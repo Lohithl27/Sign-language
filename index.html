@@ -222,7 +222,7 @@
       <div class="brand-mark">🤟</div>
       <div>
         <h1>Sign Language Recognition</h1>
-        <p>Live browser demo · runs entirely on-device, nothing leaves your camera</p>
+        <p>Live browser demo · MediaPipe Hands + temporal gesture rules · on-device processing</p>
       </div>
     </div>
     <div class="status-pill">
@@ -274,6 +274,18 @@
         </div>
       </div>
 
+
+        <div class="card">
+          <h2><span class="dot"></span>Recognition Diagnostics</h2>
+          <div id="diagnosticBox" style="font-size:12.5px;line-height:1.65;color:#b9c9d8;">
+            <div><b>Tracking:</b> <span id="diagTracking">Waiting for camera</span></div>
+            <div><b>Hands:</b> <span id="diagHands">0</span></div>
+            <div><b>Fingers:</b> <span id="diagFingers">—</span></div>
+            <div><b>Motion:</b> <span id="diagMotion">—</span></div>
+            <div><b>Gesture state:</b> <span id="diagGesture">—</span></div>
+          </div>
+        </div>
+
       <div class="card">
         <h2><span class="dot"></span>Sign Guide</h2>
         <div class="guide-grid" id="guideGrid"></div>
@@ -284,7 +296,7 @@
 
   <footer>
     Hand tracking powered by MediaPipe Hands, loaded from a CDN — an internet connection is required once at page load.<br />
-    All video processing and speech happen locally in your browser; no camera frames are uploaded anywhere.
+    Recognition uses normalized hand geometry, hand position and short temporal motion history in the browser. No camera frames are uploaded anywhere.
   </footer>
 </div>
 
@@ -379,9 +391,8 @@ let lastSpokenAt = 0;
 const HOLD_MS = 550;          // sign must be stable this long before confirming
 const RECONFIRM_GAP_MS = 1400; // avoid repeating the same word every frame
 
-let wristHistory = []; // recent wrist/palm positions for motion-based signs
 let motionHistory = [];
-const MOTION_WINDOW_MS = 900;
+const MOTION_WINDOW_MS = 1050;
 
 function palmCenter(lm) {
   return {
@@ -390,60 +401,93 @@ function palmCenter(lm) {
   };
 }
 
+function handScale(lm) {
+  return Math.max(0.0001, (dist(lm[5], lm[17]) + dist(lm[0], lm[9])) / 2);
+}
+
 function pushMotion(lm) {
+  const now = performance.now();
   if (!lm) {
     motionHistory = [];
     return;
   }
   const p = palmCenter(lm);
-  const now = performance.now();
-  motionHistory.push({ x: p.x, y: p.y, t: now });
+  const scale = handScale(lm);
+  motionHistory.push({ x:p.x, y:p.y, scale, t:now });
   const cutoff = now - MOTION_WINDOW_MS;
   motionHistory = motionHistory.filter(v => v.t >= cutoff);
+  if (motionHistory.length > 30) motionHistory.shift();
 }
 
 function motionStats() {
   if (motionHistory.length < 5) {
-    return { dx: 0, dy: 0, xRange: 0, yRange: 0, path: 0, displacement: 0, horizontal: 0, vertical: 0 };
+    return {
+      dx:0, dy:0, xRange:0, yRange:0, path:0, displacement:0,
+      horizontal:0, vertical:0, start:null, end:null, duration:0,
+      normDx:0, normDy:0, normXRange:0, normYRange:0, normPath:0
+    };
   }
+
   let path = 0;
   for (let i = 1; i < motionHistory.length; i++) {
     path += Math.hypot(
-      motionHistory[i].x - motionHistory[i - 1].x,
-      motionHistory[i].y - motionHistory[i - 1].y
+      motionHistory[i].x - motionHistory[i-1].x,
+      motionHistory[i].y - motionHistory[i-1].y
     );
   }
+
   const first = motionHistory[0];
   const last = motionHistory[motionHistory.length - 1];
   const xs = motionHistory.map(v => v.x);
   const ys = motionHistory.map(v => v.y);
+  const scale = motionHistory.reduce((a,v) => a + v.scale, 0) / motionHistory.length || 0.1;
+
   return {
-    dx: last.x - first.x,
-    dy: last.y - first.y,
-    xRange: Math.max(...xs) - Math.min(...xs),
-    yRange: Math.max(...ys) - Math.min(...ys),
+    dx:last.x-first.x,
+    dy:last.y-first.y,
+    xRange:Math.max(...xs)-Math.min(...xs),
+    yRange:Math.max(...ys)-Math.min(...ys),
     path,
-    displacement: Math.hypot(last.x - first.x, last.y - first.y),
-    horizontal: Math.abs(last.x - first.x),
-    vertical: Math.abs(last.y - first.y)
+    displacement:Math.hypot(last.x-first.x, last.y-first.y),
+    horizontal:Math.abs(last.x-first.x),
+    vertical:Math.abs(last.y-first.y),
+    start:first,
+    end:last,
+    duration:last.t-first.t,
+    normDx:(last.x-first.x)/scale,
+    normDy:(last.y-first.y)/scale,
+    normXRange:(Math.max(...xs)-Math.min(...xs))/scale,
+    normYRange:(Math.max(...ys)-Math.min(...ys))/scale,
+    normPath:path/scale
   };
 }
 
 function isCircularMotion() {
   const m = motionStats();
-  return m.path > 0.22 && m.xRange > 0.045 && m.yRange > 0.045 && m.path > m.displacement * 1.7;
+  const displacementNorm = m.displacement / Math.max(0.0001, (m.start?.scale || 0.1));
+  return m.normPath > 2.2 &&
+         m.normXRange > 0.55 &&
+         m.normYRange > 0.55 &&
+         m.normPath > displacementNorm * 1.45;
 }
 
 function isNearChest(p) {
-  return p.x > 0.25 && p.x < 0.75 && p.y > 0.42 && p.y < 0.88;
+  return p && p.x > 0.22 && p.x < 0.78 && p.y > 0.42 && p.y < 0.90;
 }
 
 function isNearFace(p) {
-  return p.y < 0.48 && p.x > 0.18 && p.x < 0.82;
+  return p && p.y < 0.50 && p.x > 0.12 && p.x < 0.88;
 }
 
 function isNearCheek(p) {
-  return p.y < 0.58 && (p.x < 0.38 || p.x > 0.62);
+  return p && p.y < 0.62 && (p.x < 0.42 || p.x > 0.58);
+}
+
+function regionName(p) {
+  if (!p) return "none";
+  if (isNearFace(p)) return "face";
+  if (isNearChest(p)) return "chest";
+  return "center";
 }
 
 /* ============================================================
@@ -455,123 +499,180 @@ function setStatus(text, mode) {
 }
 
 /* ============================================================
-   Finger geometry helpers (MediaPipe 21-point hand landmarks)
+   Finger geometry
    ============================================================ */
-const TIP = { index: 8, middle: 12, ring: 16, pinky: 20 };
-const PIP = { index: 6, middle: 10, ring: 14, pinky: 18 };
-const MCP = { index: 5, middle: 9, ring: 13, pinky: 17 };
+const TIP = { index:8, middle:12, ring:16, pinky:20 };
+const PIP = { index:6, middle:10, ring:14, pinky:18 };
+const MCP = { index:5, middle:9, ring:13, pinky:17 };
 
 function dist(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
+  return Math.hypot(a.x-b.x, a.y-b.y);
+}
+
+function angle3(a, b, c) {
+  const ab = {x:a.x-b.x, y:a.y-b.y};
+  const cb = {x:c.x-b.x, y:c.y-b.y};
+  const mag = Math.hypot(ab.x,ab.y) * Math.hypot(cb.x,cb.y);
+  if (!mag) return 0;
+  const cos = Math.max(-1, Math.min(1, (ab.x*cb.x + ab.y*cb.y)/mag));
+  return Math.acos(cos) * 180 / Math.PI;
+}
+
+function fingerExtended(lm, f) {
+  const a = angle3(lm[MCP[f]], lm[PIP[f]], lm[TIP[f]]);
+  const palm = palmCenter(lm);
+  const tipAway = dist(lm[TIP[f]], palm);
+  const pipAway = dist(lm[PIP[f]], palm);
+  return a > 155 && tipAway > pipAway * 1.08;
+}
+
+function thumbExtended(lm) {
+  const a = angle3(lm[2], lm[3], lm[4]);
+  const palm = palmCenter(lm);
+  return a > 145 && dist(lm[4], palm) > dist(lm[3], palm) * 1.12;
 }
 
 function getFingerStates(lm) {
-  const palmWidth = dist(lm[5], lm[17]) || 0.0001;
+  const extended = {
+    index:fingerExtended(lm,"index"),
+    middle:fingerExtended(lm,"middle"),
+    ring:fingerExtended(lm,"ring"),
+    pinky:fingerExtended(lm,"pinky"),
+    thumb:thumbExtended(lm)
+  };
+  const scale = handScale(lm);
+  const pinchDistance = dist(lm[4], lm[8]) / scale;
+  const isPinch = pinchDistance < 0.48;
 
-  const extended = {};
-  for (const f of ["index", "middle", "ring", "pinky"]) {
-    extended[f] = lm[TIP[f]].y < lm[PIP[f]].y && lm[PIP[f]].y < lm[MCP[f]].y;
-  }
-  // Thumb: distance-based (works regardless of hand/mirroring)
-  const thumbTipDist = dist(lm[4], lm[17]);
-  const thumbBaseDist = dist(lm[2], lm[17]);
-  extended.thumb = thumbTipDist > thumbBaseDist * 1.05;
+  return {
+    extended,
+    isPinch,
+    palmWidth:dist(lm[5],lm[17]),
+    scale,
+    pinchDistance
+  };
+}
 
-  const pinchDist = dist(lm[4], lm[8]) / palmWidth;
-  const isPinch = pinchDist < 0.45;
+function fingerPattern(e) {
+  return ["thumb","index","middle","ring","pinky"].map(k => e[k] ? "1" : "0").join("");
+}
 
-  return { extended, isPinch, palmWidth };
+function countExtended(e) {
+  return Object.values(e).filter(Boolean).length;
+}
+
+function openPalm(e) {
+  return e.index && e.middle && e.ring && e.pinky && e.thumb;
+}
+
+function closedFist(e) {
+  return !e.index && !e.middle && !e.ring && !e.pinky && !e.thumb;
+}
+
+function mostlyFlatHand(e) {
+  return e.index && e.middle && e.ring && e.pinky;
 }
 
 /* ============================================================
-   Rule engine (mirrors Table 6.1 from the project report)
+   Temporal gesture classifier
+   Uses normalized finger geometry + position + motion.
+   MediaPipe Hands is a landmark tracker; this is a browser-side
+   heuristic recognizer, not a trained sign-language ML model.
    ============================================================ */
 function classify(lm, allHands = []) {
-  const { extended: e, isPinch } = getFingerStates(lm);
-  const count = ["thumb", "index", "middle", "ring", "pinky"].filter(k => e[k]).length;
+  const { extended:e, isPinch, scale } = getFingerStates(lm);
+  const count = countExtended(e);
   const p = palmCenter(lm);
   const m = motionStats();
 
-  // Two-hand "Friend": hands close together/interlinked in the centre.
+  const motionHorizontal = m.normXRange > 0.75 && m.normXRange > m.normYRange * 1.35;
+  const motionVertical = m.normYRange > 0.65 && m.normYRange > m.normXRange * 1.10;
+  const stable = m.normPath < 0.95 || motionHistory.length < 8;
+
+  /* Friend: two hands close/interlinked near the centre chest. */
   if (allHands.length >= 2) {
     const p2 = palmCenter(allHands[1]);
-    const handsClose = dist(p, p2) < 0.22;
-    const centerChest = ((p.x + p2.x) / 2 > 0.28 && (p.x + p2.x) / 2 < 0.72 &&
-                         (p.y + p2.y) / 2 > 0.35 && (p.y + p2.y) / 2 < 0.82);
-    if (handsClose && centerChest) {
-      return { id: "friend", conf: 0.92 };
+    const twoHandDistance = dist(p,p2) / Math.max(scale, handScale(allHands[1]));
+    const cx = (p.x+p2.x)/2;
+    const cy = (p.y+p2.y)/2;
+    if (twoHandDistance < 2.2 && cx > 0.25 && cx < 0.75 && cy > 0.32 && cy < 0.84) {
+      return {id:"friend", conf:0.95};
     }
   }
 
-  // Motion/position signs are checked before generic open-palm/fist rules.
+  /* Please / Sorry: circular chest movement, distinguished by hand shape. */
   if (isCircularMotion() && isNearChest(p)) {
-    if (count === 0) return { id: "sorry", conf: 0.93 };
-    if (count >= 4) return { id: "please", conf: 0.91 };
+    if (closedFist(e)) return {id:"sorry", conf:0.96};
+    if (mostlyFlatHand(e) || openPalm(e)) return {id:"please", conf:0.94};
   }
 
-  // Food/eat: bunched fingertips/pinch brought near the mouth.
-  if ((isPinch || (e.index && e.middle && !e.ring && !e.pinky)) && isNearFace(p)) {
-    return { id: "food", conf: 0.88 };
+  /* Food / Eat: fingertips gathered and brought to the mouth. */
+  const foodShape = isPinch || (e.index && e.middle && !e.ring && !e.pinky);
+  const foodNearMouth = isNearFace(p) || (m.start && isNearFace(m.start) && m.end && isNearFace(m.end));
+  if (foodShape && foodNearMouth) {
+    return {id:"food", conf:0.92};
   }
 
-  // Cat: hand near a cheek with a short outward pull.
-  if (isNearCheek(p) && Math.abs(m.dx) > 0.045 && Math.abs(m.dx) > Math.abs(m.dy) * 1.2) {
-    return { id: "cat", conf: 0.86 };
+  /* Cat: near cheek, short horizontal outward pull. */
+  if (m.start && isNearCheek(m.start) &&
+      (motionHorizontal || Math.abs(m.normDx) > 0.65) &&
+      Math.abs(m.normDx) > Math.abs(m.normDy) * 1.15) {
+    return {id:"cat", conf:0.91};
   }
 
-  // Thanks: open/flat hand travelling outward/downward from the face.
-  if (count >= 4 && isNearFace(p) && (m.dy > 0.045 || Math.abs(m.dx) > 0.06)) {
-    return { id: "thanks", conf: 0.86 };
+  /* Thanks: open/flat hand starts near mouth/chin and travels outward/down. */
+  if (mostlyFlatHand(e) && m.start && isNearFace(m.start) &&
+      (m.normDy > 0.55 || Math.abs(m.normDx) > 0.70)) {
+    return {id:"thanks", conf:0.93};
   }
 
-  // Yes: thumbs-up, preferably with vertical movement.
+  /* Yes: thumb-up with optional vertical nodding motion. */
   if (e.thumb && !e.index && !e.middle && !e.ring && !e.pinky) {
-    if (Math.abs(m.dy) > 0.045) return { id: "yes", conf: 0.93 };
-    return { id: "yes", conf: 0.86 };
+    return {id:"yes", conf:motionVertical ? 0.97 : 0.91};
   }
 
-  // No: side-to-side hand movement without the open-palm wave pattern.
-  if (Math.abs(m.dx) > 0.08 && Math.abs(m.dx) > Math.abs(m.dy) * 1.5 &&
-      m.xRange > 0.10 && count < 4) {
-    return { id: "no", conf: 0.86 };
+  /* No: horizontal shaking with a non-open hand. */
+  if (!openPalm(e) && motionHorizontal && m.normXRange > 0.85 && Math.abs(m.normDx) < 0.75) {
+    return {id:"no", conf:0.91};
   }
 
-  // Existing signs.
-  if (e.index && e.middle && !e.thumb && !e.ring && !e.pinky) {
-    return { id: "peace", conf: 0.96 };
+  /* Peace. */
+  if (e.index && e.middle && !e.ring && !e.pinky && !e.thumb) {
+    return {id:"peace", conf:0.98};
   }
+
+  /* I Love You. */
   if (e.thumb && e.index && e.pinky && !e.middle && !e.ring) {
-    return { id: "iloveyou", conf: 0.95 };
+    return {id:"iloveyou", conf:0.98};
   }
 
-  // Water: W shape (index + middle + ring).
-  if (e.index && e.middle && e.ring && !e.thumb && !e.pinky) {
-    return { id: "water", conf: 0.90 };
+  /* Water / W: index + middle + ring extended, pinky and thumb folded. */
+  if (e.index && e.middle && e.ring && !e.pinky && !e.thumb) {
+    const nearTarget = isNearFace(p) || isNearChest(p);
+    return {id:"water", conf:nearTarget ? 0.96 : 0.90};
   }
 
-  // All Good / OK.
+  /* All Good / OK: thumb-index pinch with remaining fingers extended. */
   if (isPinch && e.middle && e.ring && e.pinky) {
-    return { id: "allgood", conf: 0.90 };
+    return {id:"allgood", conf:0.97};
   }
 
-  // Stop vs Hello: both use an open palm. A moving horizontal open palm is Hello;
-  // a stable open palm at the centre chest is Stop.
-  if (count >= 4) {
-    if (Math.abs(m.dx) > 0.06 && m.xRange > 0.08) {
-      return { id: "hello", conf: 0.91 };
-    }
-    if (isNearChest(p) && m.path < 0.14) {
-      return { id: "stop", conf: 0.90 };
-    }
-    return { id: "hello", conf: 0.82 };
+  /* Stop: open palm, steady, central chest area. */
+  if (openPalm(e) && isNearChest(p) && stable) {
+    return {id:"stop", conf:0.95};
   }
 
-  // Help: four fingers upright with thumb tucked, or a closed fist.
+  /* Hello: open palm with deliberate horizontal wave. */
+  if (openPalm(e) && motionHorizontal && m.normXRange > 0.75) {
+    return {id:"hello", conf:0.95};
+  }
+
+  /* Help: four fingers extended with thumb tucked, or a stable fist. */
   if (e.index && e.middle && e.ring && e.pinky && !e.thumb) {
-    return { id: "help", conf: 0.90 };
+    return {id:"help", conf:0.93};
   }
-  if (count === 0) {
-    return { id: "help", conf: 0.70 };
+  if (closedFist(e) && isNearChest(p)) {
+    return {id:"help", conf:0.82};
   }
 
   return null;
@@ -656,11 +757,20 @@ function updateProbabilities(topId, topConf) {
   }
 }
 
+
 function handleFrameResult(results) {
   const handsList = results && results.multiHandLandmarks ? results.multiHandLandmarks : [];
   const lm = handsList[0] || null;
 
   drawSkeleton(handsList);
+
+  const diagTracking = document.getElementById("diagTracking");
+  const diagHands = document.getElementById("diagHands");
+  const diagFingers = document.getElementById("diagFingers");
+  const diagMotion = document.getElementById("diagMotion");
+  const diagGesture = document.getElementById("diagGesture");
+
+  diagHands.textContent = String(handsList.length);
 
   if (!lm) {
     pushMotion(null);
@@ -668,13 +778,29 @@ function handleFrameResult(results) {
     liveSign.innerHTML = '<span class="none">No hand detected</span>';
     confTag.style.display = "none";
     candidateId = null;
+    diagTracking.textContent = "No hand";
+    diagFingers.textContent = "—";
+    diagMotion.textContent = "—";
+    diagGesture.textContent = "Waiting for hand";
     return;
   }
 
   pushMotion(lm);
-
+  const { extended:e, isPinch } = getFingerStates(lm);
+  const m = motionStats();
+  const pattern = fingerPattern(e);
   const result = classify(lm, handsList);
+
   updateProbabilities(result ? result.id : null, result ? result.conf : 0);
+
+  diagTracking.textContent = "Hand landmarks locked";
+  diagFingers.textContent = pattern + " (" + countExtended(e) + "/5 extended" + (isPinch ? ", pinch" : "") + ")";
+  diagMotion.textContent = "dx " + m.normDx.toFixed(1) + " · dy " + m.normDy.toFixed(1) +
+    " · range " + m.normXRange.toFixed(1) + "×" + m.normYRange.toFixed(1) +
+    " · " + regionName(palmCenter(lm));
+  diagGesture.textContent = result
+    ? SIGN_BY_ID[result.id].emoji + " " + SIGN_BY_ID[result.id].label + " · " + Math.round(result.conf*100) + "%"
+    : "No stable gesture";
 
   if (!result) {
     liveSign.innerHTML = '<span class="none">No sign detected</span>';
@@ -684,7 +810,7 @@ function handleFrameResult(results) {
   }
 
   const sign = SIGN_BY_ID[result.id];
-  liveSign.innerHTML = `<span class="emoji">${sign.emoji}</span>${sign.label}`;
+  liveSign.innerHTML = '<span class="emoji">' + sign.emoji + '</span>' + sign.label;
   confTag.style.display = "inline-block";
   confTag.textContent = Math.round(result.conf * 100) + "%";
 
@@ -806,7 +932,6 @@ function stopCamera() {
   }
   octx.clearRect(0, 0, overlay.width, overlay.height);
   motionHistory = [];
-  wristHistory = [];
   candidateId = null;
   confirmedId = null;
   placeholder.style.display = "flex";
