@@ -379,7 +379,72 @@ let lastSpokenAt = 0;
 const HOLD_MS = 550;          // sign must be stable this long before confirming
 const RECONFIRM_GAP_MS = 1400; // avoid repeating the same word every frame
 
-let wristHistory = []; // for hello wave detection
+let wristHistory = []; // recent wrist/palm positions for motion-based signs
+let motionHistory = [];
+const MOTION_WINDOW_MS = 900;
+
+function palmCenter(lm) {
+  return {
+    x: (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5,
+    y: (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5,
+  };
+}
+
+function pushMotion(lm) {
+  if (!lm) {
+    motionHistory = [];
+    return;
+  }
+  const p = palmCenter(lm);
+  const now = performance.now();
+  motionHistory.push({ x: p.x, y: p.y, t: now });
+  const cutoff = now - MOTION_WINDOW_MS;
+  motionHistory = motionHistory.filter(v => v.t >= cutoff);
+}
+
+function motionStats() {
+  if (motionHistory.length < 5) {
+    return { dx: 0, dy: 0, xRange: 0, yRange: 0, path: 0, displacement: 0, horizontal: 0, vertical: 0 };
+  }
+  let path = 0;
+  for (let i = 1; i < motionHistory.length; i++) {
+    path += Math.hypot(
+      motionHistory[i].x - motionHistory[i - 1].x,
+      motionHistory[i].y - motionHistory[i - 1].y
+    );
+  }
+  const first = motionHistory[0];
+  const last = motionHistory[motionHistory.length - 1];
+  const xs = motionHistory.map(v => v.x);
+  const ys = motionHistory.map(v => v.y);
+  return {
+    dx: last.x - first.x,
+    dy: last.y - first.y,
+    xRange: Math.max(...xs) - Math.min(...xs),
+    yRange: Math.max(...ys) - Math.min(...ys),
+    path,
+    displacement: Math.hypot(last.x - first.x, last.y - first.y),
+    horizontal: Math.abs(last.x - first.x),
+    vertical: Math.abs(last.y - first.y)
+  };
+}
+
+function isCircularMotion() {
+  const m = motionStats();
+  return m.path > 0.22 && m.xRange > 0.045 && m.yRange > 0.045 && m.path > m.displacement * 1.7;
+}
+
+function isNearChest(p) {
+  return p.x > 0.25 && p.x < 0.75 && p.y > 0.42 && p.y < 0.88;
+}
+
+function isNearFace(p) {
+  return p.y < 0.48 && p.x > 0.18 && p.x < 0.82;
+}
+
+function isNearCheek(p) {
+  return p.y < 0.58 && (p.x < 0.38 || p.x > 0.62);
+}
 
 /* ============================================================
    Status helpers
@@ -421,39 +486,92 @@ function getFingerStates(lm) {
 /* ============================================================
    Rule engine (mirrors Table 6.1 from the project report)
    ============================================================ */
-function classify(lm) {
+function classify(lm, allHands = []) {
   const { extended: e, isPinch } = getFingerStates(lm);
   const count = ["thumb", "index", "middle", "ring", "pinky"].filter(k => e[k]).length;
+  const p = palmCenter(lm);
+  const m = motionStats();
 
-  // Existing signs
+  // Two-hand "Friend": hands close together/interlinked in the centre.
+  if (allHands.length >= 2) {
+    const p2 = palmCenter(allHands[1]);
+    const handsClose = dist(p, p2) < 0.22;
+    const centerChest = ((p.x + p2.x) / 2 > 0.28 && (p.x + p2.x) / 2 < 0.72 &&
+                         (p.y + p2.y) / 2 > 0.35 && (p.y + p2.y) / 2 < 0.82);
+    if (handsClose && centerChest) {
+      return { id: "friend", conf: 0.92 };
+    }
+  }
+
+  // Motion/position signs are checked before generic open-palm/fist rules.
+  if (isCircularMotion() && isNearChest(p)) {
+    if (count === 0) return { id: "sorry", conf: 0.93 };
+    if (count >= 4) return { id: "please", conf: 0.91 };
+  }
+
+  // Food/eat: bunched fingertips/pinch brought near the mouth.
+  if ((isPinch || (e.index && e.middle && !e.ring && !e.pinky)) && isNearFace(p)) {
+    return { id: "food", conf: 0.88 };
+  }
+
+  // Cat: hand near a cheek with a short outward pull.
+  if (isNearCheek(p) && Math.abs(m.dx) > 0.045 && Math.abs(m.dx) > Math.abs(m.dy) * 1.2) {
+    return { id: "cat", conf: 0.86 };
+  }
+
+  // Thanks: open/flat hand travelling outward/downward from the face.
+  if (count >= 4 && isNearFace(p) && (m.dy > 0.045 || Math.abs(m.dx) > 0.06)) {
+    return { id: "thanks", conf: 0.86 };
+  }
+
+  // Yes: thumbs-up, preferably with vertical movement.
+  if (e.thumb && !e.index && !e.middle && !e.ring && !e.pinky) {
+    if (Math.abs(m.dy) > 0.045) return { id: "yes", conf: 0.93 };
+    return { id: "yes", conf: 0.86 };
+  }
+
+  // No: side-to-side hand movement without the open-palm wave pattern.
+  if (Math.abs(m.dx) > 0.08 && Math.abs(m.dx) > Math.abs(m.dy) * 1.5 &&
+      m.xRange > 0.10 && count < 4) {
+    return { id: "no", conf: 0.86 };
+  }
+
+  // Existing signs.
   if (e.index && e.middle && !e.thumb && !e.ring && !e.pinky) {
     return { id: "peace", conf: 0.96 };
   }
   if (e.thumb && e.index && e.pinky && !e.middle && !e.ring) {
     return { id: "iloveyou", conf: 0.95 };
   }
-  if ((isPinch && e.middle && e.ring && e.pinky) || (e.thumb && count === 1)) {
-    return { id: "allgood", conf: 0.9 };
-  }
-  if (e.index && e.middle && e.ring && e.pinky && !e.thumb) {
-    return { id: "help", conf: 0.9 };
-  }
-  if (count === 0) {
-    return { id: "help", conf: 0.7 }; // steady closed fist
-  }
-  if (count >= 4) {
-    return { id: "hello", conf: 0.85 };
+
+  // Water: W shape (index + middle + ring).
+  if (e.index && e.middle && e.ring && !e.thumb && !e.pinky) {
+    return { id: "water", conf: 0.90 };
   }
 
-  // Added signs whose shapes can be reasonably inferred from a single hand.
-  // Position/motion-dependent signs (Water, Thanks, Friend, Stop, Food, No,
-  // Cat, Please, Sorry) need additional temporal/landmark-position logic
-  // for reliable recognition; these are included in the guide and vocabulary.
-  if (e.index && e.middle && e.ring && !e.thumb && !e.pinky) {
-    return { id: "water", conf: 0.88 };
+  // All Good / OK.
+  if (isPinch && e.middle && e.ring && e.pinky) {
+    return { id: "allgood", conf: 0.90 };
   }
-  if (e.thumb && !e.index && !e.middle && !e.ring && !e.pinky) {
-    return { id: "yes", conf: 0.86 };
+
+  // Stop vs Hello: both use an open palm. A moving horizontal open palm is Hello;
+  // a stable open palm at the centre chest is Stop.
+  if (count >= 4) {
+    if (Math.abs(m.dx) > 0.06 && m.xRange > 0.08) {
+      return { id: "hello", conf: 0.91 };
+    }
+    if (isNearChest(p) && m.path < 0.14) {
+      return { id: "stop", conf: 0.90 };
+    }
+    return { id: "hello", conf: 0.82 };
+  }
+
+  // Help: four fingers upright with thumb tucked, or a closed fist.
+  if (e.index && e.middle && e.ring && e.pinky && !e.thumb) {
+    return { id: "help", conf: 0.90 };
+  }
+  if (count === 0) {
+    return { id: "help", conf: 0.70 };
   }
 
   return null;
@@ -503,23 +621,25 @@ const HAND_CONNECTIONS = [
   [5,9],[9,13],[13,17]
 ];
 
-function drawSkeleton(lm) {
+function drawSkeleton(handsList) {
   octx.clearRect(0, 0, overlay.width, overlay.height);
-  if (!lm) return;
+  if (!handsList || !handsList.length) return;
   octx.lineWidth = 3;
   octx.strokeStyle = "rgba(33,199,168,0.85)";
   octx.fillStyle = "#f5a623";
 
-  for (const [a, b] of HAND_CONNECTIONS) {
-    octx.beginPath();
-    octx.moveTo(lm[a].x * overlay.width, lm[a].y * overlay.height);
-    octx.lineTo(lm[b].x * overlay.width, lm[b].y * overlay.height);
-    octx.stroke();
-  }
-  for (const p of lm) {
-    octx.beginPath();
-    octx.arc(p.x * overlay.width, p.y * overlay.height, 4, 0, Math.PI * 2);
-    octx.fill();
+  for (const lm of handsList) {
+    for (const [a, b] of HAND_CONNECTIONS) {
+      octx.beginPath();
+      octx.moveTo(lm[a].x * overlay.width, lm[a].y * overlay.height);
+      octx.lineTo(lm[b].x * overlay.width, lm[b].y * overlay.height);
+      octx.stroke();
+    }
+    for (const p of lm) {
+      octx.beginPath();
+      octx.arc(p.x * overlay.width, p.y * overlay.height, 4, 0, Math.PI * 2);
+      octx.fill();
+    }
   }
 }
 
@@ -536,10 +656,14 @@ function updateProbabilities(topId, topConf) {
   }
 }
 
-function handleFrameResult(lm) {
-  drawSkeleton(lm);
+function handleFrameResult(results) {
+  const handsList = results && results.multiHandLandmarks ? results.multiHandLandmarks : [];
+  const lm = handsList[0] || null;
+
+  drawSkeleton(handsList);
 
   if (!lm) {
+    pushMotion(null);
     updateProbabilities(null, 0);
     liveSign.innerHTML = '<span class="none">No hand detected</span>';
     confTag.style.display = "none";
@@ -547,7 +671,9 @@ function handleFrameResult(lm) {
     return;
   }
 
-  const result = classify(lm);
+  pushMotion(lm);
+
+  const result = classify(lm, handsList);
   updateProbabilities(result ? result.id : null, result ? result.conf : 0);
 
   if (!result) {
@@ -584,14 +710,13 @@ function initHands() {
     locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
   });
   hands.setOptions({
-    maxNumHands: 1,
+    maxNumHands: 2,
     modelComplexity: 1,
     minDetectionConfidence: 0.6,
     minTrackingConfidence: 0.6,
   });
   hands.onResults((results) => {
-    const lm = results.multiHandLandmarks && results.multiHandLandmarks[0];
-    handleFrameResult(lm || null);
+    handleFrameResult(results);
   });
 }
 
@@ -680,6 +805,10 @@ function stopCamera() {
     stream = null;
   }
   octx.clearRect(0, 0, overlay.width, overlay.height);
+  motionHistory = [];
+  wristHistory = [];
+  candidateId = null;
+  confirmedId = null;
   placeholder.style.display = "flex";
   placeholderText.textContent = 'Tap "Start Camera" and hold up a sign. Works best in good, even lighting facing the camera.';
   startBtn.disabled = false;
