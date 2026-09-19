@@ -1,2 +1,713 @@
-<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign Language Recognition</title><style>body{font-family:system-ui;margin:0;padding:24px;background:#111;color:#fff}main{max-width:900px;margin:auto}iframe{width:100%;height:80vh;border:0;border-radius:16px;background:#fff}.note{padding:12px;border-radius:10px;background:#222;margin-bottom:16px}</style></head><body><main><h1>Sign Language Recognition</h1><div class="note">Loading the mobile-ready app…</div><p>Camera access requires this page to be served over HTTPS.</p></main></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Sign Language Recognition — Mobile Live Demo</title>
+
+<!-- MediaPipe Hands (hand landmark tracking) -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<style>
+  :root {
+    --navy: #0b2545;
+    --navy-2: #12345c;
+    --deep: #065a82;
+    --teal: #1c7293;
+    --sky: #2e86ab;
+    --mint: #21c7a8;
+    --amber: #f5a623;
+    --ice: #e9f3fb;
+    --slate: #5c6b7a;
+    --white: #ffffff;
+    --offwhite: #f7fafc;
+    --danger: #d9534f;
+    --radius: 14px;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--navy);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ice);
+  }
+  h1, h2, h3, .serif { font-family: ui-serif, Georgia, "Times New Roman", serif; }
+
+  .app {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 22px 18px 48px;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px;
+    margin-bottom: 22px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-mark {
+    width: 42px; height: 42px; border-radius: 11px;
+    background: linear-gradient(135deg, var(--deep), var(--mint));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; flex-shrink: 0;
+  }
+  .brand h1 { font-size: 20px; margin: 0; color: var(--white); font-weight: 700; }
+  .brand p { margin: 2px 0 0; font-size: 12.5px; color: #9fb3c8; }
+
+  .status-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    padding: 7px 14px; border-radius: 999px;
+    font-size: 13px; color: var(--ice);
+  }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--slate); transition: background .2s; }
+  .status-dot.live { background: var(--mint); box-shadow: 0 0 0 3px rgba(33,199,168,0.25); }
+  .status-dot.warn { background: var(--amber); }
+  .status-dot.err { background: var(--danger); }
+
+  /* ---------- Layout ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 1.35fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 880px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--navy-2);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: var(--radius);
+    padding: 18px;
+  }
+  .card + .card { margin-top: 16px; }
+  .card h2 {
+    font-size: 15px; margin: 0 0 12px; color: var(--white);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+
+  /* ---------- Camera panel ---------- */
+  .cam-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    background: #04162b;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  video, canvas.overlay {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1); /* mirror for natural selfie view */
+  }
+  video { z-index: 1; }
+  canvas.overlay { z-index: 2; pointer-events: none; }
+
+  .cam-placeholder {
+    position: absolute; inset: 0; z-index: 3;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; text-align: center; padding: 24px;
+    background: radial-gradient(circle at 50% 30%, #103a5c, #04162b 70%);
+  }
+  .cam-placeholder .icon { font-size: 42px; }
+  .cam-placeholder p { margin: 0; color: #b9c9d8; font-size: 13.5px; max-width: 320px; line-height: 1.5; }
+
+  .btn {
+    appearance: none; border: none; cursor: pointer;
+    font-family: inherit; font-size: 14px; font-weight: 600;
+    padding: 11px 22px; border-radius: 10px;
+    background: var(--mint); color: #04241d;
+    transition: transform .12s ease, filter .12s ease;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn:active { transform: scale(0.97); }
+  .btn.secondary { background: rgba(255,255,255,0.1); color: var(--ice); }
+  .btn.danger { background: var(--danger); color: white; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+
+  .live-caption {
+    margin-top: 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .live-sign {
+    font-size: 26px; font-weight: 700; color: var(--white);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .live-sign .emoji { font-size: 30px; }
+  .live-sign .none { color: #6b8098; font-size: 16px; font-weight: 500; }
+  .conf-tag {
+    font-size: 12.5px; color: var(--mint); background: rgba(33,199,168,0.12);
+    border: 1px solid rgba(33,199,168,0.3); padding: 4px 10px; border-radius: 999px;
+  }
+
+  /* ---------- Probability bars ---------- */
+  .prob-row { margin-bottom: 11px; }
+  .prob-row:last-child { margin-bottom: 0; }
+  .prob-label {
+    display: flex; justify-content: space-between; font-size: 12.5px;
+    color: #c7d6e4; margin-bottom: 5px;
+  }
+  .prob-track { height: 7px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+  .prob-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--deep), var(--mint)); width: 4%; transition: width .18s ease; }
+
+  /* ---------- Transcript ---------- */
+  .transcript-box {
+    min-height: 64px; max-height: 150px; overflow-y: auto;
+    background: rgba(0,0,0,0.18); border-radius: 10px; padding: 12px 14px;
+    font-size: 15.5px; line-height: 1.7; color: var(--ice);
+  }
+  .transcript-box .empty { color: #6b8098; font-size: 13px; font-style: italic; }
+  .transcript-box .word {
+    display: inline-block; background: rgba(33,199,168,0.12);
+    border: 1px solid rgba(33,199,168,0.25);
+    padding: 2px 9px; border-radius: 7px; margin: 2px 4px 2px 0; font-size: 13.5px;
+  }
+  .transcript-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .icon-btn {
+    background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);
+    color: var(--ice); font-size: 12.5px; padding: 7px 12px; border-radius: 8px;
+    cursor: pointer; display: flex; align-items: center; gap: 6px;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,0.13); }
+  .icon-btn.active { background: rgba(33,199,168,0.18); border-color: rgba(33,199,168,0.4); color: var(--mint); }
+
+  /* ---------- Sign guide ---------- */
+  .guide-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+  }
+  .guide-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 12px;
+  }
+  .guide-card .top { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+  .guide-card .top .em { font-size: 22px; }
+  .guide-card .top .name { font-weight: 700; font-size: 14px; color: var(--white); }
+  .guide-card p { margin: 0; font-size: 12px; color: #aebfcf; line-height: 1.5; }
+
+  footer {
+    margin-top: 28px; text-align: center; font-size: 12px; color: #6b8098; line-height: 1.7;
+  }
+  footer a { color: var(--sky); }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .prob-fill, .btn { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <header>
+    <div class="brand">
+      <div class="brand-mark">🤟</div>
+      <div>
+        <h1>Sign Language Recognition</h1>
+        <p>Live browser demo · runs entirely on-device, nothing leaves your camera</p>
+      </div>
+    </div>
+    <div class="status-pill">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Camera off</span>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- LEFT: Camera -->
+    <div>
+      <div class="card">
+        <h2><span class="dot"></span>Camera</h2>
+        <div class="cam-wrap">
+          <video id="video" playsinline muted></video>
+          <canvas id="overlay" class="overlay"></canvas>
+          <div class="cam-placeholder" id="placeholder">
+            <div class="icon">📷</div>
+            <p id="placeholderText">Tap "Start Camera" and hold up a sign. Works best in good, even lighting facing the camera.</p>
+            <button class="btn" id="startBtn">Start Camera</button>
+          </div>
+        </div>
+
+        <div class="live-caption">
+          <div class="live-sign" id="liveSign"><span class="none">No sign detected</span></div>
+          <div class="conf-tag" id="confTag" style="display:none;">0%</div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn secondary" id="stopBtn" disabled>Stop Camera</button>
+          <button class="icon-btn" id="muteBtn">🔊 Speech on</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Panels -->
+    <div>
+      <div class="card">
+        <h2><span class="dot"></span>Live Confidence</h2>
+        <div id="probList"></div>
+      </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>Sentence Transcript</h2>
+        <div class="transcript-box" id="transcriptBox"><span class="empty">Recognized signs will appear here…</span></div>
+        <div class="transcript-actions">
+          <button class="icon-btn" id="clearBtn">🗑 Clear</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>Sign Guide</h2>
+        <div class="guide-grid" id="guideGrid"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <footer>
+    Hand tracking powered by MediaPipe Hands, loaded from a CDN — an internet connection is required once at page load.<br />
+    All video processing and speech happen locally in your browser; no camera frames are uploaded anywhere.
+  </footer>
+</div>
+
+<script>
+/* ============================================================
+   SIGN DEFINITIONS  (matches the Android app's rule table)
+   ============================================================ */
+const SIGNS = [
+  { id: "peace",    label: "Peace",      emoji: "✌️", phrase: "Peace",
+    desc: "Hold up index and middle finger in a V shape; keep thumb, ring, and pinky curled." },
+  { id: "iloveyou", label: "I Love You", emoji: "🤟", phrase: "I love you",
+    desc: "Extend thumb, index, and pinky; curl middle and ring finger into the palm." },
+  { id: "allgood",  label: "All Good",   emoji: "👌", phrase: "All good",
+    desc: "Touch thumb and index tip together in an OK circle, or show a simple thumbs-up." },
+  { id: "help",     label: "Help",       emoji: "🆘", phrase: "Help",
+    desc: "Four fingers upright with thumb tucked across the palm, or hold a steady closed fist." },
+  { id: "hello",    label: "Hello",      emoji: "👋", phrase: "Hello",
+    desc: "Open hand, four or more fingers extended — wave side to side for best recognition." },
+  { id: "water",    label: "Water",      emoji: "💧", phrase: "Please give me water",
+    desc: "Index, middle, and ring fingers upright ('W') near the chin or chest." },
+  { id: "thanks",   label: "Thanks",     emoji: "🙏", phrase: "Thank you very much",
+    desc: "Flat hand at the chin or mouth moving outward and downward." },
+  { id: "friend",   label: "Friend",     emoji: "🤝", phrase: "You are my friend",
+    desc: "Hands clasped/interlinked at the center chest, or use hooked index fingers." },
+  { id: "stop",     label: "Stop",       emoji: "✋", phrase: "Stop, please wait",
+    desc: "Flat open palm held steady in front of the center chest." },
+  { id: "food",     label: "Food / Eat", emoji: "🍲", phrase: "I want food to eat",
+    desc: "Fingertips bunched or curled and brought directly to the lips." },
+  { id: "yes",      label: "Yes",        emoji: "👍", phrase: "Yes, I agree",
+    desc: "Thumbs-up or fist moving/nodding vertically up and down." },
+  { id: "no",       label: "No",         emoji: "👎", phrase: "No, thank you",
+    desc: "Hand moving/shaking side-to-side in front of the chest." },
+  { id: "cat",      label: "Cat",        emoji: "🐱", phrase: "Cat",
+    desc: "Hand near the cheek, pulling outward like a cat whisker." },
+  { id: "please",   label: "Please",     emoji: "🤲", phrase: "Please",
+    desc: "Open hand making a circular rub over the center of the chest." },
+  { id: "sorry",    label: "Sorry",      emoji: "🙇", phrase: "I am sorry",
+    desc: "Closed fist making a circular rub over the center of the chest." },
+];
+const SIGN_BY_ID = Object.fromEntries(SIGNS.map(s => [s.id, s]));
+
+/* ============================================================
+   DOM references
+   ============================================================ */
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const octx = overlay.getContext("2d");
+const placeholder = document.getElementById("placeholder");
+const placeholderText = document.getElementById("placeholderText");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const muteBtn = document.getElementById("muteBtn");
+const clearBtn = document.getElementById("clearBtn");
+const statusDot = document.getElementById("statusDot");
+const statusText = document.getElementById("statusText");
+const liveSign = document.getElementById("liveSign");
+const confTag = document.getElementById("confTag");
+const probList = document.getElementById("probList");
+const transcriptBox = document.getElementById("transcriptBox");
+const guideGrid = document.getElementById("guideGrid");
+
+/* Build sign guide cards */
+guideGrid.innerHTML = SIGNS.map(s => `
+  <div class="guide-card">
+    <div class="top"><span class="em">${s.emoji}</span><span class="name">${s.label}</span></div>
+    <p>${s.desc}</p>
+  </div>
+`).join("");
+
+/* Build probability bars */
+probList.innerHTML = SIGNS.map(s => `
+  <div class="prob-row">
+    <div class="prob-label"><span>${s.emoji} ${s.label}</span><span id="pct-${s.id}">0%</span></div>
+    <div class="prob-track"><div class="prob-fill" id="fill-${s.id}"></div></div>
+  </div>
+`).join("");
+
+/* ============================================================
+   State
+   ============================================================ */
+let stream = null;
+let hands = null;
+let rafId = null;
+let speechEnabled = true;
+let running = false;
+
+let smoothedConf = Object.fromEntries(SIGNS.map(s => [s.id, 0]));
+let candidateId = null;
+let candidateStart = 0;
+let confirmedId = null;
+let lastSpokenAt = 0;
+const HOLD_MS = 550;          // sign must be stable this long before confirming
+const RECONFIRM_GAP_MS = 1400; // avoid repeating the same word every frame
+
+let wristHistory = []; // for hello wave detection
+
+/* ============================================================
+   Status helpers
+   ============================================================ */
+function setStatus(text, mode) {
+  statusText.textContent = text;
+  statusDot.className = "status-dot" + (mode ? " " + mode : "");
+}
+
+/* ============================================================
+   Finger geometry helpers (MediaPipe 21-point hand landmarks)
+   ============================================================ */
+const TIP = { index: 8, middle: 12, ring: 16, pinky: 20 };
+const PIP = { index: 6, middle: 10, ring: 14, pinky: 18 };
+const MCP = { index: 5, middle: 9, ring: 13, pinky: 17 };
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function getFingerStates(lm) {
+  const palmWidth = dist(lm[5], lm[17]) || 0.0001;
+
+  const extended = {};
+  for (const f of ["index", "middle", "ring", "pinky"]) {
+    extended[f] = lm[TIP[f]].y < lm[PIP[f]].y && lm[PIP[f]].y < lm[MCP[f]].y;
+  }
+  // Thumb: distance-based (works regardless of hand/mirroring)
+  const thumbTipDist = dist(lm[4], lm[17]);
+  const thumbBaseDist = dist(lm[2], lm[17]);
+  extended.thumb = thumbTipDist > thumbBaseDist * 1.05;
+
+  const pinchDist = dist(lm[4], lm[8]) / palmWidth;
+  const isPinch = pinchDist < 0.45;
+
+  return { extended, isPinch, palmWidth };
+}
+
+/* ============================================================
+   Rule engine (mirrors Table 6.1 from the project report)
+   ============================================================ */
+function classify(lm) {
+  const { extended: e, isPinch } = getFingerStates(lm);
+  const count = ["thumb", "index", "middle", "ring", "pinky"].filter(k => e[k]).length;
+
+  // Existing signs
+  if (e.index && e.middle && !e.thumb && !e.ring && !e.pinky) {
+    return { id: "peace", conf: 0.96 };
+  }
+  if (e.thumb && e.index && e.pinky && !e.middle && !e.ring) {
+    return { id: "iloveyou", conf: 0.95 };
+  }
+  if ((isPinch && e.middle && e.ring && e.pinky) || (e.thumb && count === 1)) {
+    return { id: "allgood", conf: 0.9 };
+  }
+  if (e.index && e.middle && e.ring && e.pinky && !e.thumb) {
+    return { id: "help", conf: 0.9 };
+  }
+  if (count === 0) {
+    return { id: "help", conf: 0.7 }; // steady closed fist
+  }
+  if (count >= 4) {
+    return { id: "hello", conf: 0.85 };
+  }
+
+  // Added signs whose shapes can be reasonably inferred from a single hand.
+  // Position/motion-dependent signs (Water, Thanks, Friend, Stop, Food, No,
+  // Cat, Please, Sorry) need additional temporal/landmark-position logic
+  // for reliable recognition; these are included in the guide and vocabulary.
+  if (e.index && e.middle && e.ring && !e.thumb && !e.pinky) {
+    return { id: "water", conf: 0.88 };
+  }
+  if (e.thumb && !e.index && !e.middle && !e.ring && !e.pinky) {
+    return { id: "yes", conf: 0.86 };
+  }
+
+  return null;
+}
+
+/* ============================================================
+   Speech
+   ============================================================ */
+function speak(phrase) {
+  if (!speechEnabled || !("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(phrase);
+  u.rate = 1.0;
+  window.speechSynthesis.speak(u);
+}
+
+/* ============================================================
+   Transcript
+   ============================================================ */
+let transcriptWords = [];
+function appendTranscript(sign) {
+  transcriptWords.push(sign.phrase);
+  renderTranscript();
+}
+function renderTranscript() {
+  if (transcriptWords.length === 0) {
+    transcriptBox.innerHTML = '<span class="empty">Recognized signs will appear here…</span>';
+    return;
+  }
+  transcriptBox.innerHTML = transcriptWords.map(w => `<span class="word">${w}</span>`).join("");
+  transcriptBox.scrollTop = transcriptBox.scrollHeight;
+}
+clearBtn.addEventListener("click", () => {
+  transcriptWords = [];
+  renderTranscript();
+});
+
+/* ============================================================
+   Drawing skeleton overlay
+   ============================================================ */
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17]
+];
+
+function drawSkeleton(lm) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  if (!lm) return;
+  octx.lineWidth = 3;
+  octx.strokeStyle = "rgba(33,199,168,0.85)";
+  octx.fillStyle = "#f5a623";
+
+  for (const [a, b] of HAND_CONNECTIONS) {
+    octx.beginPath();
+    octx.moveTo(lm[a].x * overlay.width, lm[a].y * overlay.height);
+    octx.lineTo(lm[b].x * overlay.width, lm[b].y * overlay.height);
+    octx.stroke();
+  }
+  for (const p of lm) {
+    octx.beginPath();
+    octx.arc(p.x * overlay.width, p.y * overlay.height, 4, 0, Math.PI * 2);
+    octx.fill();
+  }
+}
+
+/* ============================================================
+   Update UI from a classification result
+   ============================================================ */
+function updateProbabilities(topId, topConf) {
+  for (const s of SIGNS) {
+    const target = s.id === topId ? topConf : 0.03;
+    smoothedConf[s.id] = smoothedConf[s.id] * 0.35 + target * 0.65;
+    const pct = Math.round(smoothedConf[s.id] * 100);
+    document.getElementById(`fill-${s.id}`).style.width = pct + "%";
+    document.getElementById(`pct-${s.id}`).textContent = pct + "%";
+  }
+}
+
+function handleFrameResult(lm) {
+  drawSkeleton(lm);
+
+  if (!lm) {
+    updateProbabilities(null, 0);
+    liveSign.innerHTML = '<span class="none">No hand detected</span>';
+    confTag.style.display = "none";
+    candidateId = null;
+    return;
+  }
+
+  const result = classify(lm);
+  updateProbabilities(result ? result.id : null, result ? result.conf : 0);
+
+  if (!result) {
+    liveSign.innerHTML = '<span class="none">No sign detected</span>';
+    confTag.style.display = "none";
+    candidateId = null;
+    return;
+  }
+
+  const sign = SIGN_BY_ID[result.id];
+  liveSign.innerHTML = `<span class="emoji">${sign.emoji}</span>${sign.label}`;
+  confTag.style.display = "inline-block";
+  confTag.textContent = Math.round(result.conf * 100) + "%";
+
+  const now = performance.now();
+  if (candidateId !== result.id) {
+    candidateId = result.id;
+    candidateStart = now;
+  } else if (now - candidateStart > HOLD_MS) {
+    if (confirmedId !== result.id || now - lastSpokenAt > RECONFIRM_GAP_MS) {
+      confirmedId = result.id;
+      lastSpokenAt = now;
+      speak(sign.phrase);
+      appendTranscript(sign);
+    }
+  }
+}
+
+/* ============================================================
+   MediaPipe Hands setup
+   ============================================================ */
+function initHands() {
+  hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6,
+  });
+  hands.onResults((results) => {
+    const lm = results.multiHandLandmarks && results.multiHandLandmarks[0];
+    handleFrameResult(lm || null);
+  });
+}
+
+async function processFrame() {
+  if (!running) return;
+  if (video.readyState >= 2) {
+    await hands.send({ image: video });
+  }
+  rafId = requestAnimationFrame(processFrame);
+}
+
+/* ============================================================
+   Camera lifecycle
+   ============================================================ */
+async function startCamera() {
+  startBtn.disabled = true;
+
+  // Mobile Chrome/Safari require getUserMedia() to run in a secure context.
+  // GitHub Pages serves the app over HTTPS, so this should normally be true.
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus("HTTPS required for camera", "err");
+    placeholderText.innerHTML =
+      'Camera access requires a secure HTTPS page. Open this app from its GitHub Pages <b>https://</b> link, not from a downloaded <b>file://</b> HTML file.';
+    startBtn.disabled = false;
+    return;
+  }
+
+  setStatus("Requesting camera…", "warn");
+  placeholderText.textContent = "Requesting camera permission…";
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 960 }, height: { ideal: 720 } },
+      audio: false,
+    });
+  } catch (err) {
+    console.error("Camera error:", err);
+
+    let message = "Camera access was blocked. Please allow camera permission in Chrome and try again.";
+
+    if (err && err.name === "NotAllowedError") {
+      message = "Chrome blocked camera access. Check Chrome → Settings → Site settings → Camera, allow this site, then reload.";
+    } else if (err && err.name === "NotFoundError") {
+      message = "No camera was found on this device.";
+    } else if (err && err.name === "NotReadableError") {
+      message = "The camera is already being used by another app. Close other camera/video apps and try again.";
+    } else if (err && err.name === "SecurityError") {
+      message = "Camera access was blocked because this page is not running over HTTPS.";
+    }
+
+    setStatus("Camera unavailable", "err");
+    placeholderText.textContent = message;
+    startBtn.disabled = false;
+    return;
+  }
+
+  video.srcObject = stream;
+  await video.play();
+
+  overlay.width = video.videoWidth || 960;
+  overlay.height = video.videoHeight || 720;
+
+  if (!hands) {
+    try {
+      initHands();
+    } catch (e) {
+      setStatus("Failed to load hand tracking", "err");
+      placeholderText.textContent = "Could not load MediaPipe Hands. Check your internet connection and reload the page.";
+      startBtn.disabled = false;
+      return;
+    }
+  }
+
+  placeholder.style.display = "none";
+  stopBtn.disabled = false;
+  running = true;
+  setStatus("Live — show a hand sign", "live");
+  rafId = requestAnimationFrame(processFrame);
+}
+
+function stopCamera() {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) {
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+  }
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  placeholder.style.display = "flex";
+  placeholderText.textContent = 'Tap "Start Camera" and hold up a sign. Works best in good, even lighting facing the camera.';
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  setStatus("Camera off");
+  liveSign.innerHTML = '<span class="none">No sign detected</span>';
+  confTag.style.display = "none";
+  updateProbabilities(null, 0);
+}
+
+startBtn.addEventListener("click", startCamera);
+stopBtn.addEventListener("click", stopCamera);
+
+muteBtn.addEventListener("click", () => {
+  speechEnabled = !speechEnabled;
+  muteBtn.textContent = speechEnabled ? "🔊 Speech on" : "🔇 Speech off";
+  muteBtn.classList.toggle("active", speechEnabled);
+  if (!speechEnabled && "speechSynthesis" in window) window.speechSynthesis.cancel();
+});
+muteBtn.classList.add("active");
+
+/* Keep overlay canvas sized to the displayed video box */
+window.addEventListener("resize", () => {
+  if (video.videoWidth) {
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+  }
+});
+</script>
+</body>
+</html>
